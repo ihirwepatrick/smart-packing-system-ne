@@ -1,4 +1,5 @@
 /**
+ * Implemented by Patrick Ihirwe
  * Smart Parking Management System - Kigali City
  * Single-file C++ implementation using in-memory data structures.
  *
@@ -25,7 +26,7 @@
 using namespace std;
 
 // ---------------------------------------------------------------------------
-// Enumerations & helpers
+// Enumerations & helpers 
 // ---------------------------------------------------------------------------
 
 enum class VehicleType { Motorcycle, Car, Truck };
@@ -546,7 +547,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Console UI helpers
+// Console UI helpers for the user interaction 
 // ---------------------------------------------------------------------------
 
 void clearInputStream() {
