@@ -2,7 +2,7 @@
  * Smart Parking Management System - Kigali City
  * Single-file C++ implementation using in-memory data structures.
  *
- * Compile: g++ -std=c++17 -Wall -Wextra -o smart_parking smart_parking_system.cpp
+ * Compile: g++ -o smart_parking smart_parking_system.cpp
  * Run:     ./smart_parking   (or smart_parking.exe on Windows)
  */
 
@@ -17,7 +17,6 @@
 #include <iostream>
 #include <limits>
 #include <memory>
-#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -53,24 +52,27 @@ string trimInput(const string& input) {
     return input.substr(start, end - start);
 }
 
-optional<VehicleType> parseVehicleType(const string& input) {
+bool parseVehicleType(const string& input, VehicleType& out) {
     string normalized = trimInput(input);
-    if (normalized.empty()) return nullopt;
+    if (normalized.empty()) return false;
 
-    for (char& ch : normalized) {
-        ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+    for (size_t i = 0; i < normalized.size(); ++i) {
+        normalized[i] = static_cast<char>(tolower(static_cast<unsigned char>(normalized[i])));
     }
 
     if (normalized == "1" || normalized == "m" || normalized == "motorcycle") {
-        return VehicleType::Motorcycle;
+        out = VehicleType::Motorcycle;
+        return true;
     }
     if (normalized == "2" || normalized == "c" || normalized == "car") {
-        return VehicleType::Car;
+        out = VehicleType::Car;
+        return true;
     }
     if (normalized == "3" || normalized == "t" || normalized == "truck") {
-        return VehicleType::Truck;
+        out = VehicleType::Truck;
+        return true;
     }
-    return nullopt;
+    return false;
 }
 
 string slotStatusToString(SlotStatus status) {
@@ -90,23 +92,24 @@ public:
     DateTime(int year, int month, int day, int hour, int minute)
         : year_(year), month_(month), day_(day), hour_(hour), minute_(minute) {}
 
-    static optional<DateTime> parse(const string& input) {
-        tm tm{};
+    static bool parse(const string& input, DateTime& out) {
+        tm tm = {};
         istringstream ss(input);
         ss >> get_time(&tm, "%Y-%m-%d %H:%M");
-        if (ss.fail()) return nullopt;
+        if (ss.fail()) return false;
         if (!isValid(tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                      tm.tm_hour, tm.tm_min)) {
-            return nullopt;
+            return false;
         }
-        return DateTime(tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                        tm.tm_hour, tm.tm_min);
+        out = DateTime(tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                       tm.tm_hour, tm.tm_min);
+        return true;
     }
 
     static DateTime now() {
         auto current = chrono::system_clock::now();
         time_t t = chrono::system_clock::to_time_t(current);
-        tm local{};
+        tm local = {};
 #ifdef _WIN32
         localtime_s(&local, &t);
 #else
@@ -355,7 +358,7 @@ public:
     }
 
     static bool isValidRate(int rate) {
-        return rate > 0 && rate <= 1'000'000;
+        return rate > 0 && rate <= 1000000;
     }
 };
 
@@ -375,7 +378,7 @@ struct OperationResult {
 class SmartParkingSystem {
 public:
     SmartParkingSystem() {
-        feeCalculator_ = make_unique<StandardFeeCalculator>(rateManager_.rates());
+        feeCalculator_.reset(new StandardFeeCalculator(rateManager_.rates()));
     }
 
     OperationResult addSlot(const string& id, VehicleType type, const string& zone) {
@@ -403,16 +406,16 @@ public:
             return {false, "Vehicle '" + plate + "' is already parked."};
         }
 
-        auto slotId = allocateSlot(type);
-        if (!slotId) {
+        string slotId;
+        if (!allocateSlot(type, slotId)) {
             return {false, "No available slot for " + vehicleTypeToString(type) + "."};
         }
 
-        slots_.at(*slotId).occupy();
-        removeFromAvailableIndex(*slotId, type);
-        activeVehicles_.emplace(plate, ParkedVehicle(plate, type, *slotId, entryTime));
+        slots_.at(slotId).occupy();
+        removeFromAvailableIndex(slotId, type);
+        activeVehicles_.emplace(plate, ParkedVehicle(plate, type, slotId, entryTime));
 
-        return {true, "Entry registered. Allocated slot: " + *slotId
+        return {true, "Entry registered. Allocated slot: " + slotId
                       + " at " + entryTime.toString()};
     }
 
@@ -454,7 +457,7 @@ public:
         if (!rateManager_.updateRate(type, newRate)) {
             return {false, "Failed to update rate."};
         }
-        feeCalculator_ = make_unique<StandardFeeCalculator>(rateManager_.rates());
+        feeCalculator_.reset(new StandardFeeCalculator(rateManager_.rates()));
         return {true, vehicleTypeToString(type) + " rate updated to " +
                       to_string(newRate) + " RWF/hour. Completed records unchanged."};
     }
@@ -462,9 +465,9 @@ public:
     vector<string> listSlots() const {
         vector<string> result;
         result.reserve(slots_.size());
-        for (const auto& [id, slot] : slots_) {
-            (void)id;
-            result.push_back(slot.summary());
+        for (unordered_map<string, ParkingSlot>::const_iterator it = slots_.begin();
+             it != slots_.end(); ++it) {
+            result.push_back(it->second.summary());
         }
         sort(result.begin(), result.end());
         return result;
@@ -472,8 +475,9 @@ public:
 
     vector<string> listAvailableSlots() const {
         vector<string> result;
-        for (const auto& [id, slot] : slots_) {
-            if (slot.isAvailable()) result.push_back(slot.summary());
+        for (unordered_map<string, ParkingSlot>::const_iterator it = slots_.begin();
+             it != slots_.end(); ++it) {
+            if (it->second.isAvailable()) result.push_back(it->second.summary());
         }
         sort(result.begin(), result.end());
         return result;
@@ -482,9 +486,9 @@ public:
     vector<string> listParkedVehicles() const {
         vector<string> result;
         result.reserve(activeVehicles_.size());
-        for (const auto& [plate, vehicle] : activeVehicles_) {
-            (void)plate;
-            result.push_back(vehicle.summary());
+        for (unordered_map<string, ParkedVehicle>::const_iterator it = activeVehicles_.begin();
+             it != activeVehicles_.end(); ++it) {
+            result.push_back(it->second.summary());
         }
         sort(result.begin(), result.end());
         return result;
@@ -526,12 +530,13 @@ private:
     ParkingRateManager rateManager_;
     unique_ptr<IFeeCalculator> feeCalculator_;
 
-    optional<string> allocateSlot(VehicleType type) const {
-        auto it = availableSlotIds_.find(type);
+    bool allocateSlot(VehicleType type, string& slotId) const {
+        unordered_map<VehicleType, deque<string>>::const_iterator it = availableSlotIds_.find(type);
         if (it == availableSlotIds_.end() || it->second.empty()) {
-            return nullopt;
+            return false;
         }
-        return it->second.front();
+        slotId = it->second.front();
+        return true;
     }
 
     void removeFromAvailableIndex(const string& slotId, VehicleType type) {
@@ -551,58 +556,49 @@ void clearInputStream() {
 
 string readLine(const string& prompt, const string& hint = "") {
     string value;
-    cout << prompt << '\n';
+    cout << prompt;
     if (!hint.empty()) {
-        cout << "  Hint: " << hint << '\n';
+        cout << " (" << hint << ")";
     }
-    cout << "> ";
+    cout << ": ";
     getline(cin, value);
     return value;
 }
 
 int readInt(const string& prompt, int minVal, int maxVal, const string& hint = "") {
     while (true) {
-        cout << prompt << '\n';
-        cout << "  Hint: Enter a whole number from " << minVal << " to " << maxVal;
+        cout << prompt << " [" << minVal << "-" << maxVal << "]";
         if (!hint.empty()) {
-            cout << " (" << hint << ")";
+            cout << " " << hint;
         }
-        cout << ".\n> ";
+        cout << ": ";
         int value;
         if (cin >> value && value >= minVal && value <= maxVal) {
             clearInputStream();
             return value;
         }
-        cout << "Invalid input. Please enter a number between " << minVal
-             << " and " << maxVal << ".\n";
+        cout << "Invalid. Enter " << minVal << "-" << maxVal << ".\n";
         clearInputStream();
     }
 }
 
 VehicleType readVehicleTypeInput() {
     while (true) {
-        cout << "Vehicle type\n"
-             << "  Hint: Type ONE letter or number (no need for the full word):\n"
-             << "        1 or M  = Motorcycle\n"
-             << "        2 or C  = Car\n"
-             << "        3 or T  = Truck\n"
-             << "> ";
+        cout << "Vehicle type (1/M=Motorcycle, 2/C=Car, 3/T=Truck): ";
         string input;
         getline(cin, input);
-        auto type = parseVehicleType(input);
-        if (type) return *type;
-        cout << "Invalid choice. Enter 1/M, 2/C, or 3/T only.\n";
+        VehicleType type;
+        if (parseVehicleType(input, type)) return type;
+        cout << "Invalid. Use 1/M, 2/C, or 3/T.\n";
     }
 }
 
 DateTime readDateTimeInput(const string& label) {
     while (true) {
-        string input = readLine(
-            label,
-            "Format: YYYY-MM-DD HH:MM (24-hour), e.g. 2026-06-10 14:30");
-        auto dt = DateTime::parse(input);
-        if (dt) return *dt;
-        cout << "Invalid datetime. Example: 2026-06-10 14:30\n";
+        string input = readLine(label, "YYYY-MM-DD HH:MM");
+        DateTime dt(2000, 1, 1, 0, 0);
+        if (DateTime::parse(input, dt)) return dt;
+        cout << "Invalid. Use YYYY-MM-DD HH:MM.\n";
     }
 }
 
@@ -638,27 +634,18 @@ void printMenu() {
 
 void handleAddSlot(SmartParkingSystem& system) {
     cout << "\n--- Configure Parking Slot ---\n";
-    string id = readLine(
-        "Slot ID",
-        "Unique identifier, 1-20 characters (e.g. M-01, C-02, T-01)");
+    string id = readLine("Slot ID", "e.g. M-01");
     VehicleType type = readVehicleTypeInput();
-    string zone = readLine(
-        "Zone / location",
-        "Parking area name, 1-50 characters (e.g. Zone A, Downtown, Airport)");
+    string zone = readLine("Zone", "e.g. Zone A");
     auto result = system.addSlot(id, type, zone);
     cout << (result.success ? "\n[SUCCESS] " : "\n[ERROR] ") << result.message << '\n';
 }
 
 void handleEntry(SmartParkingSystem& system) {
     cout << "\n--- Register Vehicle Entry ---\n";
-    string plate = readLine(
-        "Plate number",
-        "Alphanumeric only, max 15 chars (e.g. RAB123A, RAD456B)");
+    string plate = readLine("Plate number", "e.g. RAB123A");
     VehicleType type = readVehicleTypeInput();
-    int choice = readInt(
-        "Entry time option",
-        1, 2,
-        "1 = use current system time, 2 = enter time manually");
+    int choice = readInt("Entry time", 1, 2, "1=now, 2=manual");
     DateTime entry = (choice == 1) ? DateTime::now() : readDateTimeInput("Entry time");
     auto result = system.registerEntry(plate, type, entry);
     cout << (result.success ? "\n[SUCCESS] " : "\n[ERROR] ") << result.message << '\n';
@@ -666,13 +653,8 @@ void handleEntry(SmartParkingSystem& system) {
 
 void handleExit(SmartParkingSystem& system) {
     cout << "\n--- Process Vehicle Exit ---\n";
-    string plate = readLine(
-        "Plate number",
-        "Enter the plate of a currently parked vehicle (e.g. RAB123A)");
-    int choice = readInt(
-        "Exit time option",
-        1, 2,
-        "1 = use current system time, 2 = enter time manually");
+    string plate = readLine("Plate number", "e.g. RAB123A");
+    int choice = readInt("Exit time", 1, 2, "1=now, 2=manual");
     DateTime exitTime = (choice == 1) ? DateTime::now() : readDateTimeInput("Exit time");
     auto result = system.processExit(plate, exitTime);
     cout << (result.success ? "\n[SUCCESS] " : "\n[ERROR] ") << result.message << '\n';
@@ -680,22 +662,15 @@ void handleExit(SmartParkingSystem& system) {
 
 void handleUpdateRate(SmartParkingSystem& system) {
     cout << "\n--- Update Parking Rate ---\n";
-    cout << "Note: New rates apply only to future exits. History is unchanged.\n";
     VehicleType type = readVehicleTypeInput();
-    int rate = readInt(
-        "New hourly rate (RWF)",
-        1, 1'000'000,
-        "positive amount in Rwandan Francs, e.g. 500, 1000, 2000");
+    int rate = readInt("Hourly rate (RWF)", 1, 1000000, "e.g. 1000");
     auto result = system.updateRate(type, rate);
     cout << (result.success ? "\n[SUCCESS] " : "\n[ERROR] ") << result.message << '\n';
 }
 
 void handleDailyRevenue(SmartParkingSystem& system) {
     cout << "\n--- Daily Revenue Report ---\n";
-    int choice = readInt(
-        "Date option",
-        1, 2,
-        "1 = today's revenue, 2 = pick a specific date");
+    int choice = readInt("Date", 1, 2, "1=today, 2=custom");
     DateTime day = (choice == 1) ? DateTime::now() : readDateTimeInput("Report date");
     int revenue = system.dailyRevenue(day);
     cout << "\nRevenue on " << day.toString().substr(0, 10)
@@ -715,10 +690,7 @@ int main() {
 
     while (true) {
         printMenu();
-        int choice = readInt(
-            "Select menu option",
-            0, 11,
-            "0 = exit, 1-11 = actions shown above");
+        int choice = readInt("Option", 0, 11);
 
         switch (choice) {
             case 1:  handleAddSlot(system); break;
